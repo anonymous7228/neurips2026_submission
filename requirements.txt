@@ -1,0 +1,26 @@
+# Python 3.10 is recommended.
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.4.1+cu124
+
+lightning==2.5.5
+torchmetrics==1.8.2
+tensorboard==2.11.2
+
+numpy==1.26.4
+scipy==1.10.1
+PyYAML==6.0.1
+tqdm==4.67.1
+
+tensorflow==2.11.0
+tensorflow-datasets==4.9.0
+waymo-open-dataset-tf-2-11-0==1.6.1
+waymo-waymax @ git+https://github.com/waymo-research/waymax.git@a64dfec9be8576b60d9cecc94f406d9812d4a7d0
+
+jax==0.6.2
+jaxlib==0.6.2
+
+matplotlib==3.10.8
+opencv-python-headless==4.10.0.84
+pillow==12.2.0
+immutabledict==4.3.1
