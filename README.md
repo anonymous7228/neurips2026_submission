@@ -1,4 +1,4 @@
-# UniDBO (Anonymous Submission)
+
 
 This repository contains the UniDBO codebase for:
 
@@ -69,10 +69,8 @@ CKPT=results/train_logs/<RUN_DIR>/checkpoints/best-epoch=XX.ckpt
 ```bash
 python eval_open_loop.py \
     --config configs/open_loop.yaml \
-    --num_gpus 8 \
     --model_path ${CKPT} \
     --val_data_path data/val \
-    --device cuda \
     --output_dir results/open_loop_eval
 ```
 
@@ -85,7 +83,6 @@ python test_unidbo.py \
     --config configs/closed_loop.yaml \
     --model_path ${CKPT} \
     --test_path /path/to/womd/val_tfrecord_dir \
-    --device cuda \
     --max_scenarios 1000 \
     --save_mode csv \
     --output_dir results/closed_loop_eval
