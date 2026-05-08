@@ -1,0 +1,67 @@
+model_name: UniDBO
+
+# Data
+train_data_path: data/train
+val_data_path: data/val
+train_sample_count: null
+log_dir: results/train_logs
+
+# Model
+agents_len: 32
+future_len: 80
+action_len: 2
+encoder_layers: 6
+branch_mode: both          # dhn | cs | both
+branch_select_mode: best_fde
+train_encoder: true
+train_dhn: true
+train_cs: true
+
+# DHN: discrete high-noise branch for closed-loop rollout
+diffusion_steps: 50
+schedule_type: cosine
+schedule_s: 0
+schedule_e: 1
+schedule_tau: 1
+dhn_terminal_step: -1
+dhn_noise_start_ratio: 0.7
+dhn_noise_end_ratio: 1.0
+dhn_t_anneal_steps: 76000
+dhn_eval_mode: terminal
+dhn_supervised_weight: 1.25
+dhn_action_loss_weight: 0.05
+
+# CS: continuous-scale branch for open-loop prediction
+# Sigma is always random log-uniform sampling in [cs_sigma_min, cs_sigma_max]
+cs_num_scales: 50
+cs_sigma_min: 0.01
+cs_sigma_max: 1.0
+cs_sigma_rho: 7.0
+cs_supervised_weight: 1.25
+
+# Action normalization
+action_mean: [0.0, 0.0]
+action_std: [1.0, 0.15]
+clamp_value: 5.0
+
+# Optimization
+seed: 42
+batch_size: 8
+num_workers: 16
+train_shuffle: false
+lr: 0.0002
+weight_decay: 0.01
+epochs: 15
+lr_warmup_step: 1000
+lr_step_freq: 1000
+lr_step_gamma: 0.98
+gradient_clip_val: 1.0
+log_every_n_steps: 1
+gradient_accumulation_steps: 1
+accelerator: auto
+devices: -1
+precision: bf16-mixed
+
+# Checkpoint
+init_from: null
+ckpt_path: null

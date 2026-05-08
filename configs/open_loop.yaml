@@ -1,0 +1,12 @@
+seed: 42
+device: cuda
+accelerator: auto
+devices: null
+num_gpus: 8
+precision: null
+model_path: results/train_logs/<RUN_DIR>/checkpoints/best-epoch=XX.ckpt
+val_data_path: data/val
+output_dir: results/open_loop_eval
+batch_size: 8
+num_workers: 16
+max_batches: null

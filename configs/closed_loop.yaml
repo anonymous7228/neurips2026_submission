@@ -1,0 +1,18 @@
+seed: 42
+device: cuda
+model_path: results/train_logs/<RUN_DIR>/checkpoints/best-epoch=XX.ckpt
+test_path: data/test_tfrecord
+output_dir: results/closed_loop_eval
+max_scenarios: 1000
+# save_mode:
+# - csv: save only metrics.csv
+# - all: save metrics.csv + per-scenario mp4 + per-scenario sim pkl
+save_mode: csv
+
+dhn_terminal_step: -1
+
+replan: 10
+active_only: true
+save_simulation: false
+show_agent_ids: false
+agent_box_scale: 1.35
