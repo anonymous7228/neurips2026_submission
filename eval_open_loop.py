@@ -1,5 +1,7 @@
 import argparse
 import csv
+import datetime
+import json
 import os
 import sys
 
@@ -21,75 +23,73 @@ def load_yaml(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _pick_metric(metrics: dict, candidates: list[str]) -> float:
+    for k in candidates:
+        if k in metrics:
+            try:
+                return float(metrics[k])
+            except Exception:
+                continue
+    return float("nan")
+
+
 def _resolve_runtime(args):
-    available_gpus = torch.cuda.device_count()
-    accelerator = str(args.accelerator).lower() if args.accelerator is not None else "auto"
+    accelerator = "gpu" if (str(args.device).lower().startswith("cuda") and torch.cuda.is_available()) else "cpu"
+    if args.accelerator is not None and str(args.accelerator).lower() != "auto":
+        accelerator = str(args.accelerator).lower()
 
-    if accelerator == "auto":
-        accelerator = "gpu" if available_gpus > 0 else "cpu"
-
-    device_arg = str(args.device).lower()
-    if device_arg.startswith("cuda"):
-        accelerator = "gpu"
-    elif device_arg == "cpu":
+    if accelerator == "gpu" and not torch.cuda.is_available():
+        print("[OpenLoop] CUDA unavailable, fallback to CPU.")
         accelerator = "cpu"
 
     if args.num_gpus is not None:
-        if int(args.num_gpus) < 1:
-            raise ValueError("--num_gpus must be >= 1")
-        accelerator = "gpu"
-        devices = int(args.num_gpus)
+        req_devices = int(args.num_gpus)
+    elif args.devices is not None:
+        req_devices = int(args.devices)
     else:
-        devices = args.devices
+        req_devices = 1 if accelerator == "cpu" else -1
 
-    if accelerator == "gpu" and available_gpus == 0:
-        print("[OpenLoop] CUDA is unavailable; using CPU.")
-        accelerator = "cpu"
-
-    if devices is None:
-        devices = -1 if accelerator == "gpu" else 1
-    if accelerator == "cpu" and (devices == -1 or int(devices) < 1):
+    if accelerator == "cpu":
         devices = 1
-
-    use_multi_gpu = accelerator == "gpu" and ((devices == -1) or (int(devices) > 1))
-    strategy = DDPStrategy(find_unused_parameters=False) if use_multi_gpu else "auto"
-
-    precision = args.precision
-    if precision is None:
-        precision = "bf16-mixed" if accelerator == "gpu" else "32-true"
-    if accelerator == "cpu" and precision != "32-true":
+        strategy = "auto"
         precision = "32-true"
+        return accelerator, devices, strategy, precision
 
+    n_gpu = torch.cuda.device_count()
+    if req_devices == -1:
+        devices = n_gpu
+    else:
+        devices = req_devices
+
+    if devices <= 0:
+        raise ValueError("For GPU run, --devices/--num_gpus must be >=1 or -1.")
+    if devices > n_gpu:
+        raise ValueError(f"Requested devices={devices}, but only {n_gpu} GPUs are visible.")
+
+    strategy = DDPStrategy(find_unused_parameters=False) if devices > 1 else "auto"
+    precision = args.precision if args.precision is not None else "bf16-mixed"
     return accelerator, devices, strategy, precision
-
-
-def _scenario_id_from_path(path: str) -> str:
-    name = os.path.basename(path)
-    if name.endswith(".zip"):
-        name = name[:-4]
-    if name.endswith(".pkl"):
-        name = name[:-4]
-    if name.startswith("scenario_"):
-        name = name[len("scenario_") :]
-    return name
 
 
 @torch.no_grad()
 def evaluate(args):
     set_seed(int(args.seed))
-    from unidbo_model import UniDBOModel
+    pl.seed_everything(int(args.seed), workers=True)
+    torch.set_float32_matmul_precision("high")
 
     ckpt = torch.load(args.model_path, map_location="cpu", weights_only=False)
     ckpt_cfg = ckpt.get("hyper_parameters", {}).get("cfg", None)
     if not isinstance(ckpt_cfg, dict):
         raise RuntimeError("Checkpoint does not contain hyper_parameters.cfg")
 
-    # Open-loop protocol must use CS branch only, same validation path as training.
+    # Open-loop protocol: validate CS branch only.
     model_cfg = dict(ckpt_cfg)
     model_cfg["branch_mode"] = "cs"
     model_cfg["branch_select_mode"] = "cs"
     model_cfg["train_dhn"] = False
     model_cfg["train_cs"] = True
+
+    from unidbo_model import UniDBOModel
 
     model = UniDBOModel.load_from_checkpoint(
         args.model_path,
@@ -100,6 +100,9 @@ def evaluate(args):
     model.eval()
 
     dataset = WaymaxDataset(args.val_data_path)
+    if len(dataset) <= 0:
+        raise ValueError(f"No validation scenes found in: {args.val_data_path}")
+
     loader = DataLoader(
         dataset,
         batch_size=int(args.batch_size),
@@ -109,67 +112,68 @@ def evaluate(args):
     )
 
     accelerator, devices, strategy, precision = _resolve_runtime(args)
+
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
         strategy=strategy,
-        precision=precision,
         logger=False,
         enable_checkpointing=False,
         num_sanity_val_steps=0,
         limit_val_batches=1.0 if args.max_batches is None else int(args.max_batches),
+        precision=precision,
     )
 
-    results = trainer.validate(model, dataloaders=loader, verbose=False)
-    metrics = results[0] if results else {}
+    out = trainer.validate(model, dataloaders=loader, verbose=False)
+    metrics = out[0] if isinstance(out, list) and len(out) > 0 else {}
 
-    ade = float(metrics.get("val/ADE", 0.0))
-    fde = float(metrics.get("val/FDE", 0.0))
-    loss = float(metrics.get("val/loss", 0.0))
+    ade = _pick_metric(metrics, ["val/ADE", "val/ADE_epoch"])
+    fde = _pick_metric(metrics, ["val/FDE", "val/FDE_epoch"])
+    loss = _pick_metric(metrics, ["val/loss", "val/loss_epoch"])
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Save per-scenario metrics for debugging/analysis.
-    runtime_device = torch.device("cuda:0" if accelerator == "gpu" and torch.cuda.is_available() else "cpu")
-    model = model.to(runtime_device)
-    per_loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=int(args.num_workers),
-        pin_memory=(runtime_device.type == "cuda"),
-    )
-    per_scene_path = os.path.join(args.output_dir, "open_loop_metrics_per_scenario.csv")
-    with open(per_scene_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["index", "scenario_id", "ADE", "FDE", "loss"])
-        for idx, batch in enumerate(per_loader):
-            batch = model.batch_to_device(batch, runtime_device)
-            _, log_dict = model.forward_and_get_loss(batch, prefix="val/")
-            row_ade = float(log_dict.get("val/ADE", 0.0))
-            row_fde = float(log_dict.get("val/FDE", 0.0))
-            row_loss = float(log_dict.get("val/loss", 0.0))
-            scenario_id = _scenario_id_from_path(dataset.data_list[idx]) if idx < len(dataset.data_list) else str(idx)
-            writer.writerow([idx, scenario_id, f"{row_ade:.6f}", f"{row_fde:.6f}", f"{row_loss:.6f}"])
-        writer.writerow([])
-        writer.writerow(["MICRO_AVG", "__micro__", f"{ade:.6f}", f"{fde:.6f}", f"{loss:.6f}"])
+    metrics_csv = os.path.join(args.output_dir, "open_loop_metrics.csv")
+    with open(metrics_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["metric", "value"])
+        w.writerow(["ADE", f"{ade:.6f}"])
+        w.writerow(["FDE", f"{fde:.6f}"])
+        w.writerow(["loss", f"{loss:.6f}"])
 
-    metrics_path = os.path.join(args.output_dir, "open_loop_metrics.csv")
-    with open(metrics_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["metric", "value"])
-        writer.writerow(["ADE", f"{ade:.6f}"])
-        writer.writerow(["FDE", f"{fde:.6f}"])
-        writer.writerow(["loss", f"{loss:.6f}"])
+    summary = {
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "model_path": os.path.abspath(args.model_path),
+        "val_data_path": os.path.abspath(args.val_data_path),
+        "output_dir": os.path.abspath(args.output_dir),
+        "seed": int(args.seed),
+        "device": accelerator,
+        "devices": int(devices) if isinstance(devices, int) else str(devices),
+        "precision": str(precision),
+        "batch_size": int(args.batch_size),
+        "num_workers": int(args.num_workers),
+        "max_batches": None if args.max_batches is None else int(args.max_batches),
+        "branch_mode": "cs",
+        "branch_select_mode": "cs",
+        "metrics": {
+            "ADE": ade,
+            "FDE": fde,
+            "loss": loss,
+        },
+    }
+    summary_json = os.path.join(args.output_dir, "summary.json")
+    with open(summary_json, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    print(f"Open-loop results saved to: {metrics_path}")
-    print(f"Per-scenario results saved to: {per_scene_path}")
+    print(f"[Done] metrics_csv={metrics_csv}")
+    print(f"[Done] summary_json={summary_json}")
     print(f"ADE: {ade:.6f}")
     print(f"FDE: {fde:.6f}")
     print(f"Loss: {loss:.6f}")
     print(
         f"Runtime: accelerator={accelerator}, devices={devices}, "
-        f"precision={precision}, cs_only_validation=True"
+        f"strategy={strategy}, precision={precision}, batch_size={int(args.batch_size)}, "
+        f"num_workers={int(args.num_workers)}"
     )
 
 
@@ -196,6 +200,7 @@ def main():
         for key, value in cfg_args.items():
             if hasattr(args, key) and getattr(args, key) == defaults.get(key):
                 setattr(args, key, value)
+
     evaluate(args)
 
 
