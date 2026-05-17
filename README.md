@@ -22,7 +22,7 @@ Download Waymo Open Motion Dataset (WOMD) tf_example files:
 
 - https://waymo.com/open/data/motion/
 
-Please use WOMD data format compatible with Waymax.
+ Please use version V1.2 tf_example data to work with Waymax.
 
 ## Data Preparation
 
